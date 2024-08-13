@@ -24,6 +24,7 @@ typedef struct s_list
 {
     t_args *args;
     int is_break;
+    int is_pipe;
     int     in;
     int     out;
     struct s_list *next;
@@ -72,7 +73,7 @@ void add_free(t_address **head, t_address *new)
     }
 }
 
-t_list *new_cm(t_args *new_args, int is_break)
+t_list *new_cm(t_args *new_args, int is_break, int is_pipe)
 {
     t_list *node = malloc(sizeof(t_list));
     if(!node)
@@ -82,6 +83,7 @@ t_list *new_cm(t_args *new_args, int is_break)
     node->in = 0;
     node->out = 1;
     node->is_break = is_break;
+    node->is_pipe = is_pipe;
     node->next = NULL;
     return node;
 }
@@ -134,50 +136,58 @@ int ft_strlen(char *str)
          i++;
     return i;
 }
-int print_error(char *str)
+int err(char *str)
 {
-    write(2, str, ft_strlen(str));
-    return (1);
+    while (*str)
+        write(2, str++, 1);
+    return 1;
 }
-int pars(t_list **prog, char **av)
+int parse(t_list **prog, char **av)
 {
     int i = 1;
     t_args *args_cmd = NULL;
     t_args *is_break = new_arg(";");
+    t_args *is_pipe = new_arg("|");
     t_list *cmd = NULL;
 
-    if (!av[1] || !strcmp(av[1], "|") || !strcmp(av[1], ";"))
-        return (print_error("error: fatal\n"));
+    // if (!av[1] || !strcmp(av[1], "|"))
+    //    return 1;
 
     while (av[i])
     {
-        if ((!strcmp(av[i], ";") || !strcmp(av[i], "|")) && 
-            (!av[i + 1] || !strcmp(av[i + 1], ";") || !strcmp(av[i + 1], "|")))
-            return (print_error("error: fatal\n"));
+        // if ((!strcmp(av[i], "|")) && 
+        //     (!av[i + 1] || !strcmp(av[i + 1], ";") || !strcmp(av[i + 1], "|")))
+        //     exit(1);
 
         if(av[i] && strcmp(av[i], "|") != 0 && strcmp(av[i], ";") != 0)
             add_args(&args_cmd, new_arg(av[i]));
         if (strcmp(av[i], "|") == 0)
         {
-            add_cm(&cmd, new_cm(args_cmd, 0));
-            args_cmd = NULL; 
+            if(args_cmd)
+            {
+              add_cm(&cmd, new_cm(args_cmd, 0, 0));
+              add_cm(&cmd, new_cm(is_pipe, 0, 1));
+             args_cmd = NULL;
+            }
+            else
+             add_cm(&cmd, new_cm(is_pipe, 0, 1));
         }
         if (strcmp(av[i], ";") == 0)
         {
             if(args_cmd)
             {
-              add_cm(&cmd, new_cm(args_cmd, 0));
-              add_cm(&cmd, new_cm(is_break, 1));
+              add_cm(&cmd, new_cm(args_cmd, 0, 0));
+              add_cm(&cmd, new_cm(is_break, 1, 0));
              args_cmd = NULL;
             }
             else
-             add_cm(&cmd, new_cm(is_break, 1));
+             add_cm(&cmd, new_cm(is_break, 1, 0));
 
         }
         i++;
     }
     if (args_cmd)
-        add_cm(&cmd, new_cm(args_cmd, 0));
+        add_cm(&cmd, new_cm(args_cmd, 0, 0));
 
     *prog = cmd;      
     return 0;
@@ -185,17 +195,18 @@ int pars(t_list **prog, char **av)
 
 void close_pipe(t_mini *prog)
 {
-    if(prog->fd_arr == NULL)
-     return ;
+    if (prog->fd_arr == NULL)
+        return;
     int **fd = prog->fd_arr;
     int i = 0;
-    while(fd[i])
+    while (fd[i])
     {
         close(fd[i][0]);
         close(fd[i][1]);
         i++;
     }
 }
+
 
 void free_pipe(t_mini *prog)
 {
@@ -221,6 +232,11 @@ void open_pipe(t_mini *prog, t_list *cmd)
     {
         if(temp->is_break == 1)
           break;
+        if(temp->is_pipe == 1)
+           {
+            temp = temp->next;
+            continue;
+           }
        count++;
         temp = temp->next;
     }
@@ -228,10 +244,23 @@ void open_pipe(t_mini *prog, t_list *cmd)
      return ;
     nbr_cmd = count;
     prog->fd_arr = malloc(sizeof(int *) * count);
+    if(!prog->fd_arr)
+    {
+       return ;
+    }
     while(i < count - 1)
     {
         prog->fd_arr[i] = malloc(sizeof(int) * 2);
-        pipe(prog->fd_arr[i++]);
+        if(!prog->fd_arr[i])
+        {
+           
+            return ;
+        }
+        if(pipe(prog->fd_arr[i++]) < 0)
+        {
+            err("error: fatal\n");
+            exit(1);
+        }
     }
   prog->fd_arr[i] = NULL;
 }
@@ -278,23 +307,30 @@ char **convert_cmd(t_args *head)
    cmd[i] = NULL;
    return cmd;  
 }
-void exec(t_list *head, t_mini *prog, char **env)
+int exec(t_list *head, t_mini *prog, char **env)
 {
     pid_t pid;
     pid = fork();
     if(!pid)
     {
-        dup2(head->in, 0);
-        dup2(head->out, 1);
+        if(dup2(head->in, 0) < 0)
+        return (err("error: fatal\n"));
+        if(dup2(head->out, 1) < 0)
+         return (err("error: fatal\n"));
         close_pipe(prog);
         free_pipe(prog);
-        if(execve(prog->cmd[0], prog->cmd, env) < 0)
+        if(execve(prog->cmd[0], prog->cmd, env) == -1)
         {
-            exit(print_error("error: cannot execute executable_that_failed\n"));
+            err("error: cannot execute ");
+            err(prog->cmd[0]);
+            err("\n");
+            exit(127);
         }
     }
     if(head->next == NULL)
-     prog->last_pid = pid;
+       prog->last_pid = pid;
+
+    return 0;
 }
 
 int cd(t_list *cmd)
@@ -308,22 +344,47 @@ int cd(t_list *cmd)
         tmp = tmp->next;
     }
  if(count != 2)
-  return (print_error( "error: cd: bad arguments\n"));
+  return (err( "error: cd: bad arguments\n"));
  cur = cur->next;
  if(chdir(cur->content) < 0)
- return (print_error("error: cd: cannot change directory to path_to_change\n"));
+ return (err("error: cd: cannot change directory to path_to_change\n"));
 
  return 0;
 }
 int execut(t_mini *prog, char **env)
 {
     t_list *temp = prog->head;
-    int res = 0;
     int status = 0;
+    if(!temp)
+     return 0;
+    
+    if(temp->is_break == 1 && temp->next == NULL)
+     return 0;
+    if(temp->is_break == 1 && (temp->next != NULL || temp->is_pipe == 1))
+    {
+        temp = temp->next;
+        nbr_cmd = 0;
+    }
+    if(temp->is_pipe == 1 && (temp->next == NULL || temp->next->is_break == 1 || temp->next->is_pipe == 1))
+        return 0;
     open_pipe(prog, temp);
     set_pipe(prog, temp);
     while(temp)
     {
+        if((temp->is_pipe == 1 || temp->is_break == 1) && ( temp->next == NULL || temp->next->is_break == 1 
+        || temp->next->is_pipe == 1))
+        {
+            free_pipe(prog);
+            close_pipe(prog);
+            prog->fd_arr = NULL;
+            free_address(&g_global);
+         exit(1);
+        }
+        else if (temp->is_pipe == 1)
+        {
+            temp = temp->next;
+            nbr_cmd = 0;
+        }
         if(temp->is_break == 1)
         {
             temp = temp->next;
@@ -341,19 +402,16 @@ int execut(t_mini *prog, char **env)
     }
     close_pipe(prog);
     free_pipe(prog);
-
-if(nbr_cmd > 1)
-{
+if (prog->last_pid == 0)
+		return 0;
  waitpid(prog->last_pid, &status, 0);
  if(WIFEXITED(status))
-   res = WEXITSTATUS(status);
+   status = WEXITSTATUS(status); 
   while(wait(NULL) > 0)
-  {
+  ;
+  return status;
+}
 
-  }
-}
-  return res;
-}
 int main (int ac, char **av, char **env)
 {
     t_mini prog;
@@ -369,9 +427,10 @@ int main (int ac, char **av, char **env)
         g_global = malloc(sizeof(t_address));
         g_global->content = NULL;
         g_global->next = NULL;
-       pars(&prog.head, av);
+       parse(&prog.head, av);
       res = execut(&prog, env);
       free_address(&g_global);
     }
 return res;
 }
+
